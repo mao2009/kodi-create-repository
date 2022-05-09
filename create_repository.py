@@ -17,16 +17,15 @@ import zipfile
 
 
 def main():
-    outpu_folder  = "~/repo"
+    outpu_folder  = "./repo"
     addon_paths = [
         "https://github.com/mao2009/maorepo.git",
         "https://github.com/mao2009/kodi-addon-takoyaki.git:script.module.takoyaki"
     ]
 
     is_compressed = False
-    
-    repository = KodiRepository()
-    repository.create(outpu_folder, addon_paths, is_compressed)
+
+    KodiRepository.create(outpu_folder, addon_paths, is_compressed)
 
 
 class KodiRepository(object):
@@ -172,9 +171,7 @@ class KodiRepository(object):
             if clone_branch is not None:
                 cloned.git.checkout(clone_branch)
             source_folder = os.path.join(clone_folder, clone_folder)
-            metadata_path = os.path.join(source_folder, cls.__INFO_BASENAME)
-            print(metadata_path, addon_path)
-            input("debug")
+            metadata_path = os.path.join(source_folder, clone_path, cls.__INFO_BASENAME)
             metadata = cls.parse_metadata(metadata_path)
             target_folder = os.path.join(target_folder, metadata.id)
 
@@ -219,7 +216,6 @@ class KodiRepository(object):
     def fetch_addon_from_zip(cls, addon_path, target_folder):
         addon_path = os.path.expanduser(addon_path)
         with zipfile.ZipFile(addon_path, compression=zipfile.ZIP_DEFLATED) as archive:
-            # Find out the name of the archive's root folder.
             roots = frozenset(
                 next(iter(path.split(os.path.sep)), '')
                 for path in archive.namelist())
@@ -232,7 +228,6 @@ class KodiRepository(object):
             metadata = cls.parse_metadata(metadata_file)
             target_folder = os.path.join(target_folder, metadata.id)
 
-            # Copy the metadata files.
             if not os.path.isdir(target_folder):
                 os.mkdir(target_folder)
             for (source_basename, target_basename) in cls.get_metadata_basenames(metadata):
