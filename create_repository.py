@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 
 import collections
+import errno
 import gzip
 import hashlib
 import io
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -17,7 +19,7 @@ import zipfile
 def main():
     outpu_folder  = "~/repo"
     addon_paths = [
-        "https://github.com/mao2009/maorepo.git:maoreop",
+        "https://github.com/mao2009/maorepo.git",
         "https://github.com/mao2009/kodi-addon-takoyaki.git:script.module.takoyaki"
     ]
 
@@ -58,8 +60,11 @@ class KodiRepository(object):
         return bool(re.match('[A-Za-z0-9+.-]+://.', path))
     
     @classmethod
+    def get_posix_path(cls, path):
+        return path.replace(os.path.sep, '/')
+
+    @classmethod
     def validate_id(cls, id):
-        print(id)
         if id is None or re.match('[^a-z0-9._-]', id):
             return False
         else:
@@ -74,8 +79,6 @@ class KodiRepository(object):
 
     @classmethod
     def parse_metadata(cls, metadata_file):
-        print(metadata_file)
-        input("debug")
         try:
             tree = xml.etree.ElementTree.parse(metadata_file)
         except IOError:
@@ -88,7 +91,6 @@ class KodiRepository(object):
             root.get('version'),
             root)
 
-
         if not cls.validate_id(metadata.id):
             raise RuntimeError('Invalid addon ID: {}'.format(metadata.id))
 
@@ -98,8 +100,8 @@ class KodiRepository(object):
         return metadata
 
     @classmethod
-    def generate_checksum(cls, archive_path, is_binary=True):
-        checksum_path = '{}.md5'.format(archive_path)
+    def generate_checksum(cls, archive_path, is_binary=True, checksum_path=None):
+        checksum_path = '{}.md5'.format(archive_path) if checksum_path is None else checksum_path
         checksum_dirname = os.path.dirname(checksum_path)
         archive_relpath = os.path.relpath(archive_path, checksum_dirname)
 
@@ -126,13 +128,13 @@ class KodiRepository(object):
         if not os.path.isdir(target_folder):
             os.mkdir(target_folder)
                 
-        archive_path = os.path.join(
-            target_folder, cls.get_archive_basename(metedata))
+        archive_path = os.path.join(target_folder, cls.get_archive_basename(metedata))
+
         with open(archive_path, 'wb') as archive:
             cloned.archive(
                 archive,
-                # treeish='HEAD:{}'.format("^1"),
-                prefix='{}/'.format(metedata.id),
+                treeish='HEAD:{}'.format(clone_path),
+                prefix=cls.get_posix_path(os.path.join(metedata.id, '')),
                 format='zip')
         
         return archive_path
@@ -159,30 +161,43 @@ class KodiRepository(object):
     @classmethod
     def fetch_addon_from_git(cls, addon_path, target_folder):
 
-        match = re.match('((?:[A-Za-z0-9+.-]+://)?.*?)(?:#([^#]*?))?(?::([^:]*))?$', addon_path)
+        match = re.match(r'((?:[A-Za-z0-9+.-]+://)?.*?)(?:#([^#]*?))?(?::([^:]*))?$', addon_path)
         clone_repo, clone_branch, clone_path_option = match.group(1, 2, 3)
-        clone_path = './' if clone_path_option is None else clone_path_option
-        
-        try:
-            clone_folder = tempfile.mkdtemp('-repo')
-            source_folder = os.path.join(clone_folder, clone_path)
-            metadata_path = os.path.join(source_folder, cls.__INFO_BASENAME)
+        clone_path = (cls.get_posix_path(os.path.join('.', ''))
+                      if clone_path_option is None else clone_path_option)
 
-            cloned =  git.Repo.clone_from(clone_repo, source_folder)
+        clone_folder = tempfile.mkdtemp('-repo')
+        try:
+            cloned = git.Repo.clone_from(clone_repo, clone_folder)
             if clone_branch is not None:
                 cloned.git.checkout(clone_branch)
-                    
+            source_folder = os.path.join(clone_folder, clone_folder)
+            metadata_path = os.path.join(source_folder, cls.__INFO_BASENAME)
+            print(metadata_path, addon_path)
+            input("debug")
             metadata = cls.parse_metadata(metadata_path)
             target_folder = os.path.join(target_folder, metadata.id)
-            archive_path = cls.create_git_archive(target_folder, metadata, clone_path, cloned)
 
+            archive_path = cls.create_git_archive(target_folder, metadata, clone_path, cloned)
             cls.generate_checksum(archive_path)
             cls.copy_metadata_files(source_folder, target_folder, metadata)
 
             return metadata
         finally:
-            pass
-            # shutil.rmtree(clone_folder, ignore_errors=False)
+            shutil.rmtree(
+                clone_folder,
+                ignore_errors=False,
+                onerror=cls.on_remove_error)
+
+    @classmethod
+    def on_remove_error(cls, function, path, excinfo):
+        exc_info_value = excinfo[1]
+        if (hasattr(exc_info_value, 'errno') and
+                exc_info_value.errno == errno.EACCES):
+            os.chmod(path, stat.S_IWUSR)
+            function(path)
+        else:
+            raise
 
     @classmethod
     def fetch_addon_from_folder(cls, addon_path, target_folder):
@@ -192,6 +207,7 @@ class KodiRepository(object):
         target_folder = os.path.join(target_folder, metadata.id)
 
         archive_path = cls.create_folder_archive(target_folder, metadata, addon_path)
+
         cls.generate_checksum(archive_path)
 
         if not os.path.samefile(addon_path, target_folder):
@@ -235,7 +251,10 @@ class KodiRepository(object):
                 os.path.dirname(addon_path), target_folder) or
                 os.path.basename(addon_path) != archive_basename):
             shutil.copyfile(addon_path, archive_path)
-        cls.generate_checksum(archive_path)
+
+        info_path = cls.get_info_path(archive_path)
+        checksum_path = cls.get_checksum_path(info_path)
+        cls.generate_checksum(checksum_path)
 
         return metadata
 
@@ -281,8 +300,8 @@ class KodiRepository(object):
             addon_paths,
             target_folder,
             info_path,
-            checksum_path,
-            is_compressed):
+            checksum_path=None,
+            is_compressed=False):
 
         cls.import_git(addon_paths)
 
@@ -320,18 +339,19 @@ class KodiRepository(object):
         cls.generate_checksum(info_path, is_binary, checksum_path)
     
     @classmethod
-    def create(cls,output_folder, addon_paths, is_compressed=False):
+    def create(cls,output_folder, addon_paths, is_compressed=False, ):
         output_folder = os.path.expanduser(output_folder)
-        if is_compressed:
-            info_basename = 'addons.xml.gz'
-        else:
-            info_basename = 'addons.xml'
-
-        info_path = os.path.join(output_folder, info_basename)
-        
-        checksum_path = '{}.md5'.format(info_path)
+        info_path = cls.get_info_path(output_folder, is_compressed, True)
+        checksum_path = "{}.md5".format(info_path)
         cls.create_repository( addon_paths, output_folder, info_path, checksum_path, is_compressed)
 
+    @classmethod
+    def get_info_path(cls, folder_path, is_compressed= False, addons=False):
+        info_basename = "addons.xml" if addons else "addon.xml"
+        info_basename += ".gz" if is_compressed else ""
 
+        return os.path.join(folder_path, info_basename)
+
+   
 if __name__ == "__main__":
     main()
